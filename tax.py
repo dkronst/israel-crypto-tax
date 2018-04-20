@@ -19,6 +19,8 @@ def bitfinex_tx_translate(line):
     rate = line[3].split("@")[-1].strip().split(" ")[0]
     d['rate'] = float(rate)
     d['date'] = line[-1]
+    d['unix_time'] = line[-2]
+    d['augmented'] = False  # Augmented means that the tx is an added swap tx (e.g. buy dash with btc)
     return d
 
 def exchange_transactions(csv_filename, translate_fn):
@@ -48,7 +50,7 @@ def apply_sell_transaction(tx, fifo):
         f_r = fifo[0][1]
 
         profit += a*r - f_a*f_r
-        print("profit:", profit, fifo)
+        #print("profit:", profit, fifo)
         a -= f_a
         fifo.pop(0)
 
@@ -71,8 +73,40 @@ def calculate_tax(pl, tax_rate, losses):
     print("TAX:", tax, "with loss:",  losses)
     return tax, max(0, losses-pl)
 
-def simple_tax_calc(transactions, initial_asset_balance = 0, initial_asset_value = 0, initial_losses = 0, 
-        tax_rate = 0.25):
+def augment_transactions(orig_transactions):
+    """
+    augment the transactions with sell/buy transactions caused due to asset swap.
+    I.e. A buy of an asset with another asset is a sell transaction of original asset and then buy with the
+    secondary asset and vise versa.
+    """
+    for tx in orig_transactions:
+        if tx['asset_base'] != 'USD':
+            augmented_sell, augmented_buy = asset_price_translator(tx)
+            yield augmented_sell
+            yield augmented_buy
+        else:
+            yield tx
+
+def asset_price_translator(tx):
+    from dateutil.parser import parse
+    asset = tx['asset_base']
+
+    # Translate asset price to a price in USD at a certain date.
+    if not hasattr(asset_price_translator, "asset_prices"):
+        import pickle
+        p = pickle.load(open("{}-history.pickle".format(asset.lower), "rb"))
+        asset_price_translator.asset_prices = {}
+        asset_price_translator.asset_prices[asset] = p
+    p = 
+
+    tx_date = parse(tx['date'])
+    new_price = p[tx_date]['open']
+    new_tx = tx.copy()
+
+def base_asset_translator(tx):
+    return TRANSLATE[tx['asset_base']](tx)
+
+def simple_tax_calc(transactions, tax_rate = 0.25, initial_losses = 0):
     d = {}
     losses = initial_losses
     tax = 0
@@ -84,9 +118,7 @@ def simple_tax_calc(transactions, initial_asset_balance = 0, initial_asset_value
         
         if tx['type'] == 'buy':
             fifo.append((tx['amount']/tx['rate'], tx['rate']))
-            #print("buy:", tx['amount']/tx['rate'], tx['rate']) 
         else:
-            #print("sell:", tx['amount']/tx['rate'], tx['rate']) 
             p_l = apply_sell_transaction(tx, fifo)
             if p_l < 0:
                 losses -= p_l
@@ -96,11 +128,32 @@ def simple_tax_calc(transactions, initial_asset_balance = 0, initial_asset_value
                 tax += t
     return tax, losses
 
+def load_transactions(v):
+    transactions = bitfinex_transactions(v)
+    augment_tx = augment_transactions(transactions)
+    return list(augment_tx)
+
+def dedup(l):
+    new_l = list(l)
+    last = {'unix_time':0.0}
+    while new_l:
+        line = new_l.pop()
+        if line['unix_time'] != last['unix_time']:
+            last = line
+            yield line
+
 def main(argv):
-    transactions = list(bitfinex_transactions(sys.argv[1]))
-    #print(simple_tax_calc(transactions, "BTC"))
-    print(simple_tax_calc(transactions))
+    all_transactions = dedup(sorted(sum([load_transactions(v) for v in sys.argv[1:]], []), key=lambda x:x['unix_time']))
+    print(simple_tax_calc(all_transactions))
+
+TRANSLATE = {
+        "DSH":asset_price_translator,
+        "DASH":asset_price_translator,
+        "BTC":asset_price_translator,
+        "USD":lambda x: x
+}
 
 if __name__ == '__main__':
     import sys
     main(sys.argv)
+
