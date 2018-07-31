@@ -4,9 +4,8 @@ import csv
 from os.path import *
 
 NOT_A_BFX_EXCHANGE = ['transfer', 'deposit', 'withdrawal']
-MAX_YEAR = 1483228800
-MIN_YEAR = 1451606400
-#MIN_YEAR = 451606400
+YEAR_SECONDS = 365*24*3600
+MIN_YEAR = 1451606400 + YEAR_SECONDS
 
 PRACTICALLY_ZERO = 0.000001
 
@@ -85,7 +84,7 @@ def bitstamp_tx_translate(line):
     d['date'] = line[1]
     d['unix_time'] = parse(line[1]).timestamp()
     d['augmented'] = False
-    d['amount'] = float(line[3].split(" ")[0])
+    d['amount'] = float(line[3].split(" ")[0])*d['rate']
     return d
 
 
@@ -109,25 +108,24 @@ def apply_sell_transaction(tx, fifo):
 
     profit = 0.0
 
-    #print("apply [{}]:".format(tx['asset_tgt']), fifo[0] if fifo else None, a, r)
+    print("apply [{}]:".format(tx['asset_tgt']), fifo[0] if fifo else None, a, r)
     s = False
 
     #if tx['asset_tgt'] == 'BTC':
     #    print("\u001b[33;1mFIFO:\u001b[0m", fifo)
 
     while fifo and a > fifo[0][0]:
-        f_a, f_r = fifo.pop()
+        f_a, f_r = fifo.pop(0)
         profit += f_a*(r-f_r)
         a -= f_a
 
     if fifo:  # It is guaranteed that a <= f_a if it exists.
-        f_a, f_r = fifo.pop()
+        f_a, f_r = fifo.pop(0)
     else:
         if a > 0:
-            if input("{} fifo is empty. Assume price 0.0? [enter to continue, ctrl+c to end]".format(tx['asset_tgt'])):
-                pass                
+            print("{} fifo is empty. Assume price 0.0? [enter to continue, ctrl+c to end]".format(tx['asset_tgt']))
         f_a = a
-        f_r = 0.0  # not ideal. Probably wrong too but means you are safe from a judicial perspective.
+        f_r = 0.0  # not ideal. Probably wrong too but probably means you are safe from a judicial perspective.
     
     profit += a*(r-f_r)
     f_a -= a
@@ -140,7 +138,7 @@ def apply_sell_transaction(tx, fifo):
     return profit
 
 def calculate_tax(pl, tax_rate, losses):
-    tax = pl*tax_rate - min(pl, losses)*tax_rate
+    tax = pl*tax_rate
     print("TAX:", tax, "with loss: {}".format(0 if losses <= 0 else "\u001b[31;1m{}\u001b[0m".format(losses)))
     return tax
 
@@ -233,18 +231,24 @@ def swap_tx_translate(tx):
     new_price = p[tx_date]['open']
     return create_swap_transactions(tx, new_price)
 
-def simple_tax_calc(transactions, tax_rate = 0.25, initial_losses = 0):
+def simple_tax_calc(transactions, tax_rate = 0.25, initial_losses = 0, start_year = 0):
     def _fs(fifo):
         return sum((f[0] for f in fifo))
     d = {}
     losses = initial_losses
     tax = 0
+    started = False
     for tx in transactions:
         asset = tx['asset_tgt']
         if asset not in d:
             d[asset] = []
         fifo = d[asset]
-        
+
+        if not started and tx['unix_time'] >= start_year:
+            losses = 0
+            started = True
+        if tx['unix_time'] > start_year + YEAR_SECONDS:
+            break
         if tx['type'] == 'buy':
             print("TX: BUY:", tx['amount'], tx['asset_base'], 'to buy', tx['amount']/tx['rate'],
                     tx['asset_tgt'], "@", tx['rate'], "items in FIFO:", len(fifo), "sum:", _fs(fifo), 'augmented:', tx['augmented'], tx['date'])
@@ -255,11 +259,11 @@ def simple_tax_calc(transactions, tax_rate = 0.25, initial_losses = 0):
             p_l = apply_sell_transaction(tx, fifo)
             if p_l < 0:
                 losses -= p_l
-                #print("loss:", losses)
-            else:
-                t, losses = calculate_tax(p_l, tax_rate, losses)
+            elif start_year < tx['unix_time'] and tx['unix_time'] <= start_year + YEAR_SECONDS:
+                t = calculate_tax(p_l, 1.0, losses)
                 tax += t
-    return tax, losses
+    print(tax, losses)
+    return (tax - losses)*tax_rate
 
 def load_transactions(v):
     if not basename(v).startswith("bitstamp"):
@@ -267,7 +271,6 @@ def load_transactions(v):
     else:
         transactions = bitstamp_transactions(v)
     augment_tx = augment_transactions(transactions)
-    #return list((tx for tx in augment_tx if tx['unix_time'] > MIN_YEAR))
     return list(augment_tx)
 
 def dedup(l):
@@ -280,8 +283,8 @@ def dedup(l):
             yield line
 
 def main(argv):
-    all_transactions = sorted(sum([load_transactions(v) for v in sys.argv[1:]], []), key=lambda x:int(x['unix_time']))
-    print(simple_tax_calc(all_transactions, year))
+    all_transactions = list(dedup(sorted(sum([load_transactions(v) for v in sys.argv[1:]], []), key=lambda x:-int(x['unix_time']))))
+    print(simple_tax_calc(all_transactions, 0.25, 0, MIN_YEAR))
 
 if __name__ == '__main__':
     import sys
